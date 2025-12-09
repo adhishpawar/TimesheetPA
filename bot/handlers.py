@@ -1,7 +1,8 @@
 # bot/handlers.py
 import json
-from datetime import datetime
-from bot.nlp_llm import llm_extract_timesheet
+from datetime import datetime, timedelta
+
+from bot.nlp.extract import extract_timesheet_entries   # your existing extractor
 from bot.db import (
     get_or_create_session,
     update_session,
@@ -10,56 +11,93 @@ from bot.db import (
     store_timesheet_entries,
 )
 
+print("******* USING NEW HANDLER *******")
+
+
+# ----------------------- UTILS ----------------------- #
+
+def safe_date(date_str: str) -> datetime.date:
+    """convert GPT date returned as string into date object"""
+    if not date_str:
+        return datetime.now().date()
+
+    date_str = date_str.strip().lower()
+
+    if date_str == "today":
+        return datetime.now().date()
+    if date_str == "yesterday":
+        return datetime.now().date() - timedelta(days=1)
+
+    try:
+        return datetime.fromisoformat(date_str).date()
+    except Exception:
+        return datetime.now().date()
+
+
 def clean_llm_output(output: str) -> str:
-    out = output.strip()
-    out = out.replace("```json", "")
-    out = out.replace("```", "")
-    out = out.strip()
-    return out
+    """Remove code blocks and format for JSON"""
+    return (
+        output.replace("```json", "")
+        .replace("```", "")
+        .strip()
+    )
+
+
+def is_explicit_date_question(text: str) -> bool:
+    """Fix of your old 'today/day' logic"""
+    t = text.lower().strip()
+    patterns = [
+        "what is today",
+        "what day is today",
+        "what's the date",
+        "date today",
+        "today date",
+        "which day is today",
+    ]
+    return any(p in t for p in patterns)
+
 
 def is_greeting(text: str) -> bool:
-    t = text.lower().strip()
-    return t in {"hi", "hello", "hey", "hi bot", "hello bot"}
+    return text.lower().strip() in {"hi", "hello", "hey", "hi bot", "hello bot"}
 
-def is_date_question(text: str) -> bool:
-    t = text.lower()
-    return "today" in t and ("date" in t or "day" in t)
 
+# ----------------------- MAIN HANDLER ----------------------- #
 
 async def handle_incoming_message(external_user_id: str, message: str):
-    # ---------- load or create session ----------
     session = await get_or_create_session(external_user_id)
     state = session["state"]
     temp_username = session.get("temp_username")
     user_id = session.get("user_id")
 
-    # ---------- STATE: not authenticated ----------
+    # ----------  AUTHENTICATION FLOW  ----------
     if state != "AUTHENTICATED":
-        # First message / greeting
-        if state in ("NEW",) and is_greeting(message):
+
+        # greeting → ask username
+        if state == "NEW" and is_greeting(message):
             await update_session(external_user_id, state="ASK_USERNAME")
             return {"reply": "Hi 👋 I'm your Timesheet PA.\nPlease enter your username:"}
 
-        # Asking for username
-        if state in ("NEW", "ASK_USERNAME") and not is_greeting(message):
+        # username
+        if state in ("NEW", "ASK_USERNAME"):
             username = message.strip()
             user = await get_user_by_username(username)
             if not user:
-                # user unknown
                 await update_session(external_user_id, state="ASK_USERNAME")
                 return {"reply": "I couldn't find that username. Please enter a valid username:"}
 
-            await update_session(external_user_id, state="ASK_PASSWORD", temp_username=username)
+            await update_session(external_user_id,
+                                 state="ASK_PASSWORD",
+                                 temp_username=username)
             return {"reply": f"Hi {user.get('display_name') or username}! Please enter your password:"}
 
-        # Asking for password
+        # password
         if state == "ASK_PASSWORD":
             username = temp_username
             user = await verify_user_password(username, message.strip())
+
             if not user:
                 return {"reply": "❌ Invalid password. Please try again:"}
 
-            # auth success
             await update_session(
                 external_user_id,
                 state="AUTHENTICATED",
@@ -80,66 +118,70 @@ async def handle_incoming_message(external_user_id: str, message: str):
         await update_session(external_user_id, state="ASK_USERNAME")
         return {"reply": "Hello! Please enter your username to continue:"}
 
-    # ---------- STATE: AUTHENTICATED ----------
-    # small PA responses
+    # ----------  AFTER LOGIN: handle normal messages ---------- #
+
+    # greeting
     if is_greeting(message):
         today = datetime.now()
         return {
-            "reply": f"Hello again 👋\nToday is {today.strftime('%A, %d %B %Y')}.\n"
-                     f"You can log work or ask about your logged hours."
+            "reply": (
+                f"Hello 👋\n"
+                f"Today is {today.strftime('%A, %d %B %Y')}.\n"
+                f"You can log time or ask about your logged hours."
+            )
         }
 
-    if is_date_question(message):
+    # date question
+    if is_explicit_date_question(message):
         today = datetime.now()
-        return {
-            "reply": f"Today is {today.strftime('%A, %d %B %Y')}."
-        }
+        return {"reply": f"Today is {today.strftime('%A, %d %B %Y')}."}
 
-    # Otherwise, treat as timesheet message
-    llm_output = await llm_extract_timesheet(message)
+    # ---------- treat as timesheet entry ---------- #
+    llm_output = await extract_timesheet_entries(message)
     cleaned = clean_llm_output(llm_output)
 
     try:
         parsed = json.loads(cleaned)
-    except Exception as e:
-        print("LLM parse error", e, "RAW:", llm_output)
-        return {"reply": "Sorry, I couldn't understand that timesheet entry 🤖"}
+    except Exception:
+        return {"reply": "Sorry, I couldn't read that entry 🤖"}
 
     if not isinstance(parsed, list):
         parsed = [parsed]
 
     entries = []
-    for e in parsed:
-        date_value = e.get("date")
-        entry_date = None
+    for p in parsed:
+        hours = float(p.get("hours", 0) or 0)
 
-        if date_value:
-            try:
-                entry_date = datetime.fromisoformat(date_value).date()
-            except:
-                entry_date = datetime.now().date()
-        else:
-            entry_date = datetime.now().date()
+        # if no hours found → handle gracefully
+        if hours <= 0:
+            continue
 
         entry = {
-            "entry_date": entry_date,
-            "project": e.get("project", "General"),
-            "task": e.get("task_description", ""),
-            "hours": float(e.get("hours", 0)),
-            "task_type": e.get("task_type"),
+            "entry_date": safe_date(p.get("date")),
+            "project": p.get("project", "General"),
+            "task": p.get("task_description", ""),
+            "hours": hours,
+            "task_type": p.get("task_type"),
             "raw_msg": message,
         }
         entries.append(entry)
 
+    # if no valid entries (hours missing)
+    if not entries:
+        return {
+            "reply": (
+                "I understood the task, but I couldn't find hours.\n"
+                "Please specify hours, for example:\n"
+                "  \"Today I tested mobile app for 4 hours\""
+            )
+        }
 
+    # finally store
     await store_timesheet_entries(user_id, entries)
 
-    # Simple confirmation text
-    lines = []
-    for e in entries:
-        lines.append(
-            f"• {e['entry_date']} — {e['project']} — {e['task']} — {e['hours']}h ({e.get('task_type') or 'N/A'})"
-        )
-
-    reply = "Logged these entries ✅\n" + "\n".join(lines)
-    return {"reply": reply}
+    # success message
+    lines = [
+        f"• {e['entry_date']} — {e['project']} — {e['task']} — {e['hours']}h ({e.get('task_type') or 'N/A'})"
+        for e in entries
+    ]
+    return {"reply": "Logged these entries ✓\n" + "\n".join(lines)}
