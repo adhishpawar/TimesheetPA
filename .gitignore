@@ -1,0 +1,126 @@
+# -------------------------------
+# Python general
+# -------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyo
+*.pyd
+
+# virtual environments
+.venv/
+env/
+venv/
+
+# distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+coverage.xml
+.cache
+nosetests.xml
+coverage/
+*.cover
+*.py,cover
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# pytest
+.pytest_cache/
+
+# -------------------------------
+# IDE & local tooling
+# -------------------------------
+.vscode/
+.idea/
+*.sublime*
+*.swp
+*.swo
+
+# -------------------------------
+# OS files
+# -------------------------------
+.DS_Store
+Thumbs.db
+
+# -------------------------------
+# Environments / secrets
+# -------------------------------
+.env
+.env.local
+.env.development
+.env.production
+.env.*    # prevent accidental leaks
+
+# -------------------------------
+# logs
+# -------------------------------
+*.log
+logs/
+debug.log
+
+# -------------------------------
+# Database
+# -------------------------------
+*.sqlite
+*.db
+*.sqlite3
+__db/
+
+# -------------------------------
+# compiled
+# -------------------------------
+*.dll
+*.exe
+*.o
+*.a
+
+# -------------------------------
+# Node / frontend build (future dashboard)
+# -------------------------------
+node_modules/
+npm-debug.log*
+yarn-error.log*
+dist/
+build/
+
+# -------------------------------
+# Bot Framework emulator cache
+# -------------------------------
+.botstate
+.botconfig
+
+# -------------------------------
+# Temporary files
+# -------------------------------
+*.tmp
+*.temp
+*.bak
+*.original
+*.backup
+~$*

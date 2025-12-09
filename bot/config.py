@@ -1,0 +1,1 @@
+POSTGRES_URL = "postgresql+asyncpg://postgres:root@localhost:5432/MSBot"
