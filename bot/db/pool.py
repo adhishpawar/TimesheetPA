@@ -1,49 +1,84 @@
+# bot/db/pool.py - Database connection pooling
+# Async PostgreSQL with asyncpg
+
 import asyncpg
+import logging
+
 from bot.config import POSTGRES_DSN
-from bot.logging import logger
+
+logger = logging.getLogger(__name__)
 
 _pool: asyncpg.Pool | None = None
 
-async def init_pool():
+
+async def init_pool() -> asyncpg.Pool:
+    """Initialize database pool and create schema"""
     global _pool
-    if _pool is None:
-        logger.info(f"Connecting to Postgres: {POSTGRES_DSN}")
-        _pool = await asyncpg.create_pool(dsn=POSTGRES_DSN)
-        await _create_schema()
-        logger.info("Postgres pool initialized & schema ensured.")
+
+    if _pool is not None:
+        return _pool
+
+    logger.info(f"Connecting to PostgreSQL: {POSTGRES_DSN}")
+
+    _pool = await asyncpg.create_pool(
+        dsn=POSTGRES_DSN,
+        min_size=1,
+        max_size=10,
+        timeout=60,
+    )
+
+    await _create_schema()
+    logger.info("Postgres pool initialized & schema ensured.")
+    return _pool
+
 
 def get_pool() -> asyncpg.Pool:
     if _pool is None:
-        raise RuntimeError("DB pool not initialized, call init_pool() first.")
+        raise RuntimeError("DB pool not initialized, call init_pool() first")
     return _pool
+
 
 async def _create_schema():
     pool = get_pool()
     async with pool.acquire() as conn:
-        # users table (role-ready)
+        # users
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id SERIAL PRIMARY KEY,
             username VARCHAR(100) UNIQUE NOT NULL,
-            login_code VARCHAR(20),            -- optional shared code/PIN
             password_hash VARCHAR(255) NOT NULL,
-            display_name VARCHAR(200),
-            role VARCHAR(50) DEFAULT 'user',   -- 'user', 'admin'
-            timezone VARCHAR(100) DEFAULT 'Asia/Kolkata'
+            display_name VARCHAR(200)
         );
         """)
 
-        # sessions table (one per external platform user id)
+        # invites for first-time onboarding
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS invites (
+            code VARCHAR(100) PRIMARY KEY,
+            role VARCHAR(50) DEFAULT 'user',
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            used BOOLEAN DEFAULT false,
+            used_by INT REFERENCES users(user_id),
+            used_at TIMESTAMPTZ
+        );
+        """)
+
+        # sessions with pending clarifications
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             external_id TEXT PRIMARY KEY,
             user_id INT REFERENCES users(user_id),
-            state VARCHAR(50) NOT NULL,        -- NEW / ASK_USERNAME / ASK_CODE / ASK_PASSWORD / AUTHENTICATED
+            state VARCHAR(50) NOT NULL,
             temp_username VARCHAR(100),
+            temp_display_name VARCHAR(200),
+            invite_code VARCHAR(100),
+            pending_action VARCHAR(50),
+            pending_entries JSONB,
             updated_at TIMESTAMPTZ DEFAULT NOW()
         );
         """)
 
+        # timesheet data
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS timesheet (
             entry_id SERIAL PRIMARY KEY,
@@ -59,14 +94,4 @@ async def _create_schema():
         );
         """)
 
-        # Seed default user if missing
-        existing = await conn.fetchval("SELECT user_id FROM users WHERE username = 'adhish'")
-        if not existing:
-            import bcrypt
-            pwd = "Timesheet@123"
-            hashed = bcrypt.hashpw(pwd.encode(), bcrypt.gensalt()).decode()
-            await conn.execute("""
-                INSERT INTO users (username, password_hash, display_name, role)
-                VALUES ($1, $2, $3, $4)
-            """, "adhish", hashed, "Adhish Pawar", "admin")
-            logger.info("Seeded default admin user: adhish / Timesheet@123")
+        logger.info("Database schema ensured.")
